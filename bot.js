@@ -2,9 +2,11 @@ const mineflayer = require('mineflayer');
 const config = require('./config.json');
 
 let bot;
+let reconnectAttempts = 0;
+let reconnectTimer;
 
 function createBot() {
-  bot = mineflayer.createBot({
+  const currentBot = mineflayer.createBot({
     host: config.serverHost,
     port: config.serverPort,
     username: config.botUsername,
@@ -12,62 +14,57 @@ function createBot() {
     version: false,
     viewDistance: config.botChunk
   });
+  bot = currentBot;
 
-  let movementPhase = 0;
-  const STEP_INTERVAL = 1500;
-  const STEP_SPEED    = 1;
-  const JUMP_DURATION = 500;
+  let readyTimer;
+  let stableTimer;
+  let ended = false;
 
-  bot.on('spawn', () => {
-    setTimeout(() => {
-      bot.setControlState('sneak', true);
-      console.log(`✅ ${config.botUsername} is Ready!`);
-    }, 3000);
+  currentBot.once('inject_allowed', () => {
+    if (!currentBot.supportFeature('sendsClientTickEndPacket')) return;
 
-    setTimeout(movementCycle, STEP_INTERVAL);
+    currentBot.on('physicsTick', () => {
+      setImmediate(() => {
+        if (!ended && currentBot._client.state === 'play') {
+          currentBot._client.write('tick_end', {});
+        }
+      });
+    });
   });
 
-  function movementCycle() {
-    if (!bot || !bot.entity) return;
-
-    switch (movementPhase) {
-      case 0:
-        bot.setControlState('forward', true);
-        bot.setControlState('back', false);
-        bot.setControlState('jump', false);
-        break;
-      case 1:
-        bot.setControlState('forward', false);
-        bot.setControlState('back', true);
-        bot.setControlState('jump', false);
-        break;
-      case 2:
-        bot.setControlState('forward', false);
-        bot.setControlState('back', false);
-        bot.setControlState('jump', true);
-        setTimeout(() => {
-          if (bot && bot.entity) bot.setControlState('jump', false);
-        }, JUMP_DURATION);
-        break;
-      case 3:
-        bot.setControlState('forward', false);
-        bot.setControlState('back', false);
-        bot.setControlState('jump', false);
-        break;
-    }
-
-    movementPhase = (movementPhase + 1) % 4;
-
-    setTimeout(movementCycle, STEP_INTERVAL);
+  function clearTimers() {
+    clearTimeout(readyTimer);
+    clearTimeout(stableTimer);
   }
 
-  bot.on('error', (err) => {
+  currentBot.on('spawn', () => {
+    clearTimers();
+    stableTimer = setTimeout(() => {
+      if (!ended && bot === currentBot) reconnectAttempts = 0;
+    }, 60000);
+    readyTimer = setTimeout(() => {
+      if (ended || bot !== currentBot || !currentBot.entity) return;
+      console.log(`✅ ${config.botUsername} is Ready!`);
+    }, 3000);
+  });
+
+  currentBot.on('error', (err) => {
     console.error('⚠️ Error:', err);
   });
 
-  bot.on('end', () => {
+  currentBot.on('end', () => {
+    if (ended) return;
+    ended = true;
+    clearTimers();
     console.log('⛔️ Bot Disconnected!');
-    setTimeout(createBot, 5000);
+    if (!reconnectTimer) {
+      const delay = Math.min(5000 * 2 ** reconnectAttempts, 60000);
+      reconnectAttempts += 1;
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = undefined;
+        createBot();
+      }, delay);
+    }
   });
 }
 
